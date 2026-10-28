@@ -118,8 +118,10 @@ class MercariFetcher:
     def _process_item(self, item: dict):
         try:
             raw_price = item.get("price")
-            sold_price = raw_price if isinstance(raw_price, (int, float)) else (
+            # Mercari US API often returns price in cents. Divide by 100 if it's a large integer.
+            raw_val = raw_price if isinstance(raw_price, (int, float)) else (
                 raw_price.get("value") if isinstance(raw_price, dict) else 0)
+            sold_price = (raw_val / 100) if isinstance(raw_val, (int, float)) and raw_val > 100 else raw_val
 
             # Use _safe_string to ensure all fields are strings or None
             category_name = self._safe_string(item.get("itemCategory", {}).get("name") or item.get("categoryName"))

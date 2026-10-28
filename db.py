@@ -159,6 +159,16 @@ class LodeDB:
                          VALUES (?, ?, ?, ?, ?)
                          """, (listing_id, url, local_path, emb_blob, datetime.utcnow().isoformat()))
 
+
+    def update_photo_embedding(self, photo_id: int, embedding: np.ndarray):
+        """Updates an existing photo record with its CLIP embedding."""
+        emb_blob = embedding.tobytes()
+        with self.get_conn() as conn:
+            conn.execute("""
+                UPDATE photos SET embedding = ? WHERE id = ?
+            """, (emb_blob, photo_id))
+
+
     def get_embedding(self, photo_id: int, dim: int = 512) -> np.ndarray:
         """Retrieves and reconstructs a numpy embedding from a BLOB."""
         with self.get_conn() as conn:
@@ -166,3 +176,13 @@ class LodeDB:
             if row and row['embedding']:
                 return np.frombuffer(row['embedding'], dtype=np.float32).reshape(dim)
         return None
+
+    def get_photos_without_embeddings(self, limit: int = 100) -> list:
+        """Fetches photos that are missing embeddings, to process in batches."""
+        with self.get_conn() as conn:
+            rows = conn.execute("""
+                SELECT id, listing_id, url FROM photos 
+                WHERE embedding IS NULL AND url IS NOT NULL 
+                LIMIT ?
+            """, (limit,)).fetchall()
+            return [dict(row) for row in rows]
