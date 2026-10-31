@@ -10,13 +10,13 @@ logger = logging.getLogger(__name__)
 
 
 class MercariFetcher:
-    def __init__(self, db: LodeDB):
+    def __init__(self, db: LodeDB, vision_engine=None):
         self.db = db
+        self.vision_engine = vision_engine  # Optional: pass VisionEngine to auto-embed
         self.latest_items = None
         self.waiting_for_payload = True
 
     def _calculate_dom(self, listed_at: str | int, sold_at: str | int) -> int:
-        """Calculates Days on Market. Handles epoch ints or ISO strings."""
         try:
             if isinstance(listed_at, (int, float)) and isinstance(sold_at, (int, float)):
                 listed = datetime.fromtimestamp(listed_at)
@@ -29,11 +29,9 @@ class MercariFetcher:
             return 0
 
     def _safe_string(self, value) -> str | None:
-        """Ensures value is a string or None, not a dict or other type."""
         if value is None:
             return None
         if isinstance(value, dict):
-            # Try to extract 'name' or 'value' from the dict
             return value.get('name') or value.get('value') or str(value)
         return str(value)
 
@@ -54,11 +52,9 @@ class MercariFetcher:
                     try:
                         data = await response.json()
                         search_data = data.get("data", {}).get("search", {})
-
                         items = search_data.get("itemsList", [])
                         if not items:
                             items = search_data.get("items", [])
-
                         if items:
                             self.latest_items = items
                             self.waiting_for_payload = False
@@ -82,7 +78,6 @@ class MercariFetcher:
 
                 try:
                     await page.goto(url, wait_until='domcontentloaded', timeout=30000)
-
                     for _ in range(30):
                         if not self.waiting_for_payload:
                             break
@@ -97,7 +92,6 @@ class MercariFetcher:
                         item_id = item.get("id")
                         if item_id in processed_ids:
                             continue
-
                         self._process_item(item)
                         processed_ids.add(item_id)
                         saved_count += 1
@@ -107,23 +101,29 @@ class MercariFetcher:
 
                     if page_num < max_pages - 1:
                         await page.wait_for_timeout(random.uniform(2500, 4500))
-
                 except Exception as e:
-                    logger.error(f"❌ Page navigation failed on page {page_num + 1}: {e}")
+                    logger.error(f" Page navigation failed: {e}")
                     break
 
             await browser.close()
             logger.info(f"Mercari scraping complete. Total items saved: {total_saved}")
 
+            # AUTO-EMBED TRIGGER
+            if self.vision_engine:
+                logger.info("🧠 Auto-triggering Vision Engine to embed new photos...")
+                # process_batch runs in a synchronous loop, which is fine here
+                self.vision_engine.process_batch(batch_size=50)
+                logger.info("✅ All new photos embedded and ready for search!")
+
     def _process_item(self, item: dict):
         try:
             raw_price = item.get("price")
-            # Mercari US API often returns price in cents. Divide by 100 if it's a large integer.
-            raw_val = raw_price if isinstance(raw_price, (int, float)) else (
+            sold_price = raw_price if isinstance(raw_price, (int, float)) else (
                 raw_price.get("value") if isinstance(raw_price, dict) else 0)
-            sold_price = (raw_val / 100) if isinstance(raw_val, (int, float)) and raw_val > 100 else raw_val
+            # Mercari US API often returns price in cents.
+            if isinstance(sold_price, (int, float)) and sold_price > 100:
+                sold_price = sold_price / 100.0
 
-            # Use _safe_string to ensure all fields are strings or None
             category_name = self._safe_string(item.get("itemCategory", {}).get("name") or item.get("categoryName"))
             brand_name = self._safe_string(item.get("brand", {}).get("name") or item.get("brandName"))
             condition_name = self._safe_string(item.get("itemCondition", {}).get("name") or item.get("condition"))
@@ -138,7 +138,8 @@ class MercariFetcher:
                 "brand": brand_name,
                 "size": size_name,
                 "condition": condition_name,
-                "original_price": raw_price if isinstance(raw_price, (int, float)) else None,
+                "original_price": raw_price if isinstance(raw_price, (int, float)) and raw_price <= 100 else (
+                    raw_price / 100.0 if isinstance(raw_price, (int, float)) else None),
                 "sold_price": sold_price,
                 "listed_at": item.get("created"),
                 "sold_at": item.get("soldAt"),
@@ -157,14 +158,18 @@ class MercariFetcher:
                 photo_url = photo.get("imageUrl") or photo.get("url") or photo.get("thumbnailUrl")
                 if photo_url:
                     self.db.insert_photo(listing_id=local_id, url=photo_url)
-
         except Exception as e:
             logger.error(f"Failed to process item {item.get('id')}: {e}")
 
 
 if __name__ == "__main__":
+    # For CLI usage, we can optionally load the vision engine
+    # To keep CLI fast, we'll leave it un-embedded by default,
+    # but you can uncomment the next 3 lines to auto-embed via CLI.
     db = LodeDB()
-    fetcher = MercariFetcher(db)
-    logger.info("Starting Mercari fetch (Production Mode - Type Safe)...")
-    asyncio.run(fetcher.search_sold("vintage leather jacket", max_pages=3))
-    logger.info("Done. Check your lodemetrics.db.")
+    # from vision_engine import VisionEngine
+    # engine = VisionEngine(db)
+    fetcher = MercariFetcher(db)  # Pass 'engine' here if you want CLI auto-embed
+    logger.info("Starting Mercari fetch...")
+    asyncio.run(fetcher.search_sold("vintage leather jacket", max_pages=1))
+    logger.info("Done.")
